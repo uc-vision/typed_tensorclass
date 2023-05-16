@@ -1,18 +1,18 @@
-from dataclasses import InitVar, asdict, dataclass, field, fields, replace
+from dataclasses import InitVar, dataclass, fields
 from numbers import Number
 import torch
 
 from torch import Tensor
-from jaxtyping.array_types import _NamedVariadicDim
+from jaxtyping.array_types import _NamedVariadicDim, _NamedDim, _FixedDim, AbstractArray
 
-from jaxtyping import Float, Int, jaxtyped
+from jaxtyping import Float, Int
+import copy
 
 
-def add_batch_dim(t, name='N', broadcast=True):
+def _add_batch_dim(t, name='N', broadcast=True):
+  t = copy.copy(t)
   if t.index_variadic is not None:
-    if t.index_variadic != 0 or t.dims[0].name != name:
-      raise ValueError(f"Index variadic must be first dimension with name {name}")
-    
+    raise ValueError(f"Variadic dimension not allowed in TensorClass {t.dim_str}")
   else:
     t.dims=(_NamedVariadicDim(name, broadcast), *t.dims)
     t.index_variadic = 0
@@ -20,8 +20,31 @@ def add_batch_dim(t, name='N', broadcast=True):
   return t
 
 
+def _tensor_info(t, sizes):
+  if t.index_variadic is not None:
+    raise ValueError(f"Variadic dimension not allowed in TensorClass {t.dim_str}")
+
+  def get_size(d):
+    if isinstance(d, _NamedDim):
+      if d.name in sizes:
+        return sizes[d.name]
+      else:
+        raise ValueError(f"Dimension {d.name} must be provided")
+    elif isinstance(d, _FixedDim):
+      return d.size
+    else:
+      raise ValueError(f"TensorClass does not support dimension {d}")
+    
+  return tuple(get_size(d) for d in t.dims), t.dtype
 
 
+def _shape_info(t, sizes):
+  if issubclass(t, AbstractArray):
+    return _tensor_info(t, sizes)
+  elif issubclass(t, TensorClass):
+    return t.shape_info(**sizes)
+  else:
+    return None
 
 @dataclass(kw_only=True, repr=False)
 class TensorClass():
@@ -42,7 +65,7 @@ class TensorClass():
     for f in fields(self):
       value = getattr(self, f.name)    
       if isinstance(value, torch.Tensor):
-        t = add_batch_dim(f.type, broadcast=broadcast) if batched else f.type
+        t = _add_batch_dim(f.type, broadcast=broadcast) if batched else f.type
 
         if not t._check_shape(value, single_memo=memo, variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo):
 
@@ -57,6 +80,9 @@ class TensorClass():
 
       self.batch_size = variadic_memo.get('N', None) if broadcast is False else variadic_broadcast_memo.get('N', None)
 
+  @classmethod
+  def shape_info(cls, **sizes):
+    return {f.name: _shape_info(f.type, sizes) for f in fields(cls)}
 
   def __iter__(self):
     fs = fields(self)
@@ -84,40 +110,41 @@ class TensorClass():
   def expand(self, shape):
     return self.map(lambda t: t.expand(shape))
 
-  @classmethod
-  def empty(cls:type, shape=(), device='cpu', **kwargs):
-    if isinstance(shape, Number):
-      shape = (shape,)
+  # @classmethod
+  # def empty(cls:type, shape=(), device='cpu', sizes=None, **kwargs):
+  #   sizes = {} if sizes is None else sizes
+  #   if isinstance(shape, Number):
+  #     shape = (shape,)
     
-    def make_tensor(k, info):
-      if k in kwargs:
-        return kwargs[k]
+  #   def make_tensor(k, info):
+  #     if k in kwargs:
+  #       return kwargs[k]
 
-      if info is None:
-        raise RuntimeError(f"{k}: has no argument or tensor annotation")
+  #     if info is None:
+  #       raise RuntimeError(f"{k}: has no argument or tensor annotation")
 
-      if info.dtype is None:
-        raise RuntimeError(f"{k}: has no dtype annotation")
+  #     if info.dtype is None:
+  #       raise RuntimeError(f"{k}: has no dtype annotation")
       
-      field_shape = (d.size for d in info.shape.dims)
-      return torch.empty( tuple( (*shape, *field_shape) ), 
-        dtype=info.dtype.dtype, device=device)
+  #     field_shape = (d.size for d in info.shape.dims)
+  #     return torch.empty( tuple( (*shape, *field_shape) ), 
+  #       dtype=info.dtype.dtype, device=device)
 
 
-    return cls(**{f.name:make_tensor(f.name, self.(f.type)) 
-      for f in fields(cls)}) 
+  #   return cls(**{f.name:make_tensor(f.name, self.(f.type)) 
+  #     for f in fields(cls)}) 
 
 
 
 
-  def unsqueeze(self, dim):
-    assert dim <= len(self.shape), f"Cannot unsqueeze dim {dim} in shape {self.shape}"
-    return self.map(lambda t: t.unsqueeze(dim))
+  # def unsqueeze(self, dim):
+  #   assert dim <= len(self.shape), f"Cannot unsqueeze dim {dim} in shape {self.shape}"
+  #   return self.map(lambda t: t.unsqueeze(dim))
 
 
-  def __repr__(self):
-    name= self.__class__.__name__
-    return f"{name}({shape(asdict(self))})"
+  # def __repr__(self):
+  #   name= self.__class__.__name__
+  #   return f"{name}({shape(asdict(self))})"
 
 
 
