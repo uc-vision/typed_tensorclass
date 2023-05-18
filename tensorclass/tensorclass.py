@@ -3,46 +3,40 @@ from numbers import Number
 import torch
 
 from torch import Tensor
-from jaxtyping.array_types import _NamedVariadicDim, _NamedDim, _FixedDim, AbstractArray
+from jaxtyping.array_types import _NamedVariadicDim, _NamedDim, _FixedDim, AbstractArray, Float32, Int32
 
 from jaxtyping import Float, Int
 import copy
 
 
 def _add_batch_dim(t, name='N', broadcast=True):
-  t = copy.copy(t)
   if t.index_variadic is not None:
     raise ValueError(f"Variadic dimension not allowed in TensorClass {t.dim_str}")
   else:
-    t.dims=(_NamedVariadicDim(name, broadcast), *t.dims)
-    t.index_variadic = 0
-
-  return t
+    return type(f"Batched{t.__name__})", (t,), dict(index_variadic=0, dims=(_NamedVariadicDim(name, broadcast), *t.dims)))
 
 
-def _tensor_info(t, sizes):
+
+def _tensor_info(t):
   if t.index_variadic is not None:
     raise ValueError(f"Variadic dimension not allowed in TensorClass {t.dim_str}")
 
   def get_size(d):
     if isinstance(d, _NamedDim):
-      if d.name in sizes:
-        return sizes[d.name]
-      else:
-        raise ValueError(f"Dimension {d.name} must be provided")
+      return d.name
     elif isinstance(d, _FixedDim):
       return d.size
     else:
       raise ValueError(f"TensorClass does not support dimension {d}")
     
-  return tuple(get_size(d) for d in t.dims), t.dtype
+  return tuple(get_size(d) for d in t.dims), t.dtypes
 
 
-def _shape_info(t, sizes):
+def _shape_info(t):
   if issubclass(t, AbstractArray):
-    return _tensor_info(t, sizes)
+    return _tensor_info(t)
   elif issubclass(t, TensorClass):
-    return t.shape_info(**sizes)
+    return t.shape_info()
   else:
     return None
 
@@ -70,19 +64,19 @@ class TensorClass():
         if not t._check_shape(value, single_memo=memo, variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo):
 
           if self.batch_size is not None:
-            batch = f"batch {tuple(*self.batch_size)}, "
+            batch = f"batch {tuple(self.batch_size)}, "
 
           class_name = self.__class__.__name__
+          print(self.shape_info())
           raise TypeError(f"{class_name}.{f.name}: bad shape {value.shape}, for {batch}shape ({t.dim_str}), broadcast={broadcast}")
         
       elif isinstance(value, TensorClass):
         value.check_shapes(broadcast=broadcast, memo=memo, variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo)
-
       self.batch_size = variadic_memo.get('N', None) if broadcast is False else variadic_broadcast_memo.get('N', None)
 
   @classmethod
-  def shape_info(cls, **sizes):
-    return {f.name: _shape_info(f.type, sizes) for f in fields(cls)}
+  def shape_info(cls):
+    return {f.name: _shape_info(f.type) for f in fields(cls)}
 
   def __iter__(self):
     fs = fields(self)
@@ -148,8 +142,8 @@ class TensorClass():
 
 
 
-  def __post_init__(self, broadcast):
-    self.check_shapes(broadcast=broadcast)
+  def __post_init__(self, broadcast, batched):
+    self.check_shapes(broadcast=broadcast, batched=batched)
 
 
 
@@ -157,23 +151,26 @@ class TensorClass():
 
 @dataclass
 class T(TensorClass):
-  a: Float[Tensor, "3"]
-  b: Int[Tensor, "3"]
+  a: Float32[Tensor, "N"]
+  b: Int32[Tensor, "N"]
   c: str
 
 
 @dataclass
 class F(TensorClass):
-  a: T
-  b: Int[Tensor, "5"]
-  c: str
+  i: T
+  j: Int32[Tensor, "5"]
+  k: str
 
 
 
 if __name__ == "__main__":
 
+  print(T.shape_info)
 
-  t = T(a=torch.randn(5, 1, 3), b=torch.randn(5, 1, 3).to(torch.long), c = "hello", broadcast=True)
-  f = F(a=t, b=torch.randn(5, 7, 5).to(torch.long), c = "hello")
+
+  x = T(a=torch.randn(5, 1, 3), b=torch.randn(5, 1, 3).to(torch.long), c = "hello", broadcast=True)
+  y = T(a=torch.randn(5, 1, 3), b=torch.randn(5, 1, 3).to(torch.long), c = "hello", broadcast=True)
+  f = F(i=x, j=torch.randn(5, 7, 5).to(torch.long), k = "hello")
 
   # print(test_foo(t.a, t.b))
