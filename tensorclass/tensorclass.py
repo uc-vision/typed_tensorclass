@@ -1,12 +1,10 @@
-from dataclasses import InitVar, dataclass, fields
+from dataclasses import InitVar, dataclass, fields, Field
 from numbers import Number
+from typing import List
 import torch
 
 from torch import Tensor
 from jaxtyping.array_types import _NamedVariadicDim, _NamedDim, _FixedDim, AbstractArray, Float32, Int32
-
-from jaxtyping import Float, Int
-import copy
 
 _batch_dim = '_B'
 
@@ -60,7 +58,8 @@ dtype_to_torch = dict(
   int8=torch.int8,
   int16=torch.int16,
   int32=torch.int32,
-  int64=torch.int64
+  int64=torch.int64,
+  bool = torch.bool
 )
 
 
@@ -98,7 +97,7 @@ def _broadcast(value, shape, batch_shape):
 
 def batch_from_memo(variadic_memo, variadic_broadcast_memo):
   if _batch_dim in variadic_memo:
-    return variadic_memo[_batch_dim]
+    return tuple(variadic_memo[_batch_dim])
   elif _batch_dim in variadic_broadcast_memo:
     shapes = variadic_broadcast_memo[_batch_dim]
     return tuple(torch.broadcast_shapes(*shapes))
@@ -117,15 +116,20 @@ def arr_shape(t:AbstractArray):
 
 def arr_dims(t:AbstractArray):
   return len(t.dims)
+
+def field_shape(f:Field, value:torch.Tensor):
+  return tuple(value.shape[-arr_dims(f.type):])
+    
+
     
 @dataclass(kw_only=True, repr=False)
 class TensorClass():
   # Broadcast prefixes shapes together
   broadcast:  InitVar[bool] = False
-  batched:  InitVar[bool] = True
+  convert_types:  InitVar[bool] = False
 
 
-  def check_shapes(self, broadcast=False, batched=True, memo=None, variadic_memo=None, variadic_broadcast_memo=None):
+  def check_shapes(self, broadcast=False, convert_types=False, memo=None, variadic_memo=None, variadic_broadcast_memo=None):
     memo = {} if memo is None else memo
     variadic_memo = {} if variadic_memo is None else variadic_memo
     variadic_broadcast_memo = {} if variadic_broadcast_memo is None else variadic_broadcast_memo
@@ -135,8 +139,10 @@ class TensorClass():
 
     for f in fields(self):
       value = getattr(self, f.name)    
+
       if issubclass(f.type, AbstractArray):
-        t = _add_batch_dim(f.type, broadcast=broadcast) if batched else f.type
+        t = _add_batch_dim(f.type, broadcast=broadcast)
+
         if not t._check_shape(value, single_memo=memo, 
               variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo):
           
@@ -147,17 +153,27 @@ class TensorClass():
           class_name = self.__class__.__name__
           raise TypeError(f"{class_name}.{f.name}: bad shape {value.shape}, for {batch}shape ({t.dim_str}), broadcast={broadcast}")
         
+        dtype = str(value.dtype).split('.')[-1]
+        if dtype not in f.type.dtypes:
+          if convert_types:
+            value = value.to(lookup_dtype(f.type.dtypes))
+            setattr(self, f.name, value)
+          else:
+            raise TypeError(f"Type mismatch for {f.name}, expected one of {f.type.dtypes}, got {dtype}")
+
       elif issubclass(f.type, TensorClass):
         value.check_shapes(broadcast=broadcast, memo=memo, variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo)
 
       self.batch_shape = batch_from_memo(variadic_memo, variadic_broadcast_memo)
+
+
 
     if broadcast:  
       for f in fields(self):
         value = getattr(self, f.name)    
         if issubclass(f.type, AbstractArray):
           
-          target_shape = self.batch_shape + value.shape[-arr_dims(f.type):]
+          target_shape = self.batch_shape + field_shape(f, value)
           value = value.broadcast_to(target_shape)
         elif issubclass(f.type, TensorClass):
           value = value.broadcast_to(self.batch_shape)
@@ -177,25 +193,30 @@ class TensorClass():
         cls._variables = get_variables(f.type)
     return cls._variables
   
-  def _shapes(self):
-    def f(t):
-      if isinstance(t, Tensor):
-        return t.shape
-      elif isinstance(t, TensorClass):
-        return t._shapes()
+  @property
+  def shape(self):
+    def g(f:Field):
+      value = getattr(self, f.name)
+      if issubclass(f.type, AbstractArray):
+        return field_shape(f, value)
+      elif isinstance(f, TensorClass):
+        return value.shape()
       else:
-        return t
-    return {k:f(t) for k, t in iter(self)}
+        return value
+    return {f.name:g(f) for f in fields(self)}
 
-  def _shape_info(self):
-    def f(t):
-      if isinstance(t, Tensor):
-        return (t.shape, t.dtype, str(t.device))
-      elif isinstance(t, TensorClass):
-        return t._shape_info()
+  @property
+  def shape_info(self):
+    def g(f:Field):
+      value = getattr(self, f.name)
+      if issubclass(f.type, AbstractArray):
+        return (field_shape(f, value), value.dtype, str(value.device))
+      elif isinstance(f, TensorClass):
+        return value.shape_info()
       else:
-        return t
-    return {k:f(t) for k, t in iter(self)}
+        return value
+    return {f.name:g(f) for f in fields(self)}
+
 
 
 
@@ -221,7 +242,7 @@ class TensorClass():
 
 
   def map(self, func):
-    def f(field):
+    def g(field):
       value = getattr(self, field.name)
       if issubclass(field.type, AbstractArray):
         return func(value)
@@ -230,7 +251,7 @@ class TensorClass():
       else:
         return value
 
-    d = {k:f(t) for k, t in fields(self)}
+    d = {f.name:g(f) for f in fields(self)}
     return self.__class__(**d)
 
   def __getitem__(self, slice):
@@ -268,19 +289,46 @@ class TensorClass():
   def empty(cls:type, batch_shape=(), device=torch.device('cpu'), sizes=None, **kwargs):
     return cls._build(torch.empty, batch_shape=batch_shape, device=device, sizes=sizes, **kwargs)
 
+  @classmethod
+  def zeros(cls:type, batch_shape=(), device=torch.device('cpu'), sizes=None, **kwargs):
+    return cls._build(torch.zeros, batch_shape=batch_shape, device=device, sizes=sizes, **kwargs)
+
+
 
   def unsqueeze(self, dim):
     assert dim <= len(self.batch_shape), f"Cannot unsqueeze dim {dim} in shape {self.shape}"
     return self.map(lambda t: t.unsqueeze(dim))
+  
+  def asdict(self) -> dict:
+    def get_value(value):
+      if isinstance(value, TensorClass):
+        return value.asdict()
+      else:
+        return value
+    return {k: get_value(value) for k, value in self.__iter__()}
+        
+  def tensors(self) -> List[torch.Tensor]:
+    x = []
+    for f in self.asdict().values():
+      if isinstance(f, TensorClass):
+        x.extend(f.tensors())
+      elif isinstance(f, torch.Tensor):
+        x.append(f)
 
+    return x
+
+  def flat(self):
+    return torch.concat([t.reshape(*self.batch_shape, -1) for t in self.tensors()], dim=-1)
 
   def __repr__(self):
     name= self.__class__.__name__
-    return f"{name}({self._shapes()})"
+
+    info = ", ".join([f"{k}={v}" for k, v in self.shape_info.items()])
+    return f"{name}({info}, batch_shape={self.batch_shape})"
 
 
-  def __post_init__(self, broadcast, batched):
-    self.check_shapes(broadcast=broadcast, batched=batched)
+  def __post_init__(self, broadcast,  convert_types):
+    self.check_shapes(broadcast=broadcast,  convert_types=convert_types)
 
 
 
@@ -298,6 +346,7 @@ if __name__ == "__main__":
   class F(TensorClass):
     i: T
     j: Int32[Tensor, "5"]
+    blah: Float32[Tensor, "5"] = torch.Tensor([1.0])
 
 
 
