@@ -210,7 +210,7 @@ class TensorClass():
     def g(f:Field):
       value = getattr(self, f.name)
       if issubclass(f.type, AbstractArray):
-        return (field_shape(f, value), value.dtype, str(value.device))
+        return (field_shape(f, value), value.dtype)
       elif isinstance(f, TensorClass):
         return value.shape_info()
       else:
@@ -218,6 +218,16 @@ class TensorClass():
     return {f.name:g(f) for f in fields(self)}
 
 
+  @classmethod
+  def static_shape_info(cls):
+    def g(f:Field):
+      if issubclass(f.type, AbstractArray):
+        return (arr_shape(f.type), lookup_dtype(f.type.dtypes))
+      elif issubclass(f.type, TensorClass):
+        return f.type.static_shape_info()
+      else:
+        return value
+    return {f.name:g(f) for f in fields(self)}
 
 
   def __iter__(self):
