@@ -3,8 +3,11 @@ from numbers import Number
 from typing import List
 import torch
 
+from functools import cached_property
+
 from torch import Tensor
-from jaxtyping.array_types import _NamedVariadicDim, _NamedDim, _FixedDim, AbstractArray, Float32, Int32
+from jaxtyping.array_types import _NamedVariadicDim,\
+    _NamedDim, _FixedDim, AbstractArray, Float32, Int32
 
 _batch_dim = '_B'
 
@@ -162,11 +165,9 @@ class TensorClass():
             raise TypeError(f"Type mismatch for {f.name}, expected one of {f.type.dtypes}, got {dtype}")
 
       elif issubclass(f.type, TensorClass):
-        value.check_shapes(broadcast=broadcast, memo=memo, variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo)
-
+        value.check_shapes(broadcast=broadcast, 
+            memo=memo, variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo)
       self.batch_shape = batch_from_memo(variadic_memo, variadic_broadcast_memo)
-
-
 
     if broadcast:  
       for f in fields(self):
@@ -181,7 +182,7 @@ class TensorClass():
         setattr(self, f.name, value)
       
   def broadcast_to(self, batch_shape):
-    x = self.map_with_info(lambda _, arr, shape: _broadcast(arr, shape, batch_shape))
+    x = self.map_tensors(lambda _, arr, shape: _broadcast(arr, shape, batch_shape))
     return x
 
 
@@ -216,6 +217,17 @@ class TensorClass():
       else:
         return value
     return {f.name:g(f) for f in fields(self)}
+  
+  @cached_property
+  def device(self):
+    devices = [(k, v.device) for k, v in self if hasattr(v, 'device')]
+    
+    d = devices[0][1]
+    for name, device in devices:
+      if device != d:
+        raise ValueError(f"Device mismatch for {name}, expected {devices[0][1]}, got {device}")
+    
+    return d
 
 
   @classmethod
@@ -235,34 +247,48 @@ class TensorClass():
     for f in fs:
       yield (f.name, getattr(self, f.name))
 
-  def map_with_info(self, func):
+  def map_tensors(self, func):
     def g(field):
       value = getattr(self, field.name)
       if issubclass(field.type, AbstractArray):
         shape = arr_shape(field.type)
         return func(field.name, value, shape=shape)
       elif isinstance(value, TensorClass):
-        return value.map_with_info(func)
+        return value.map_tensors(func)
       else:
         return value
 
     d = {f.name:g(f) for f in fields(self)}
     return self.__class__(**d)
-
 
 
   def map(self, func):
     def g(field):
       value = getattr(self, field.name)
-      if issubclass(field.type, AbstractArray):
-        return func(value)
-      elif isinstance(value, TensorClass):
+      if isinstance(value, TensorClass):
         return value.map(func)
       else:
-        return value
+        return func(value)
 
     d = {f.name:g(f) for f in fields(self)}
     return self.__class__(**d)
+
+  def zip(self, other, func):
+    assert self.__class__ == other.__class__, f"Cannot zip TensorClass of different types: {self.__class__} != {other.__class__}"
+
+    def g(field):
+      value1 = getattr(self, field.name)
+      value2 = getattr(other, field.name)
+      
+      if isinstance(value, TensorClass):
+        return value1.zip(value2, func)
+      else:
+        return func(value1, value2)
+
+    d = {f.name:g(f) for f in fields(self)}
+    return self.__class__(**d)
+
+
 
   def __getitem__(self, slice):
     return self.map(lambda t: t[slice])
@@ -328,14 +354,14 @@ class TensorClass():
     return x
 
   def flat(self):
-    return torch.concat([t.reshape(*self.batch_shape, -1) for t in self.tensors()], dim=-1)
+    return torch.concat([t.reshape(*self.batch_shape, -1) 
+                         for t in self.tensors()], dim=-1)
 
   def __repr__(self):
     name= self.__class__.__name__
 
     info = ", ".join([f"{k}={v}" for k, v in self.shape_info.items()])
     return f"{name}({info}, batch_shape={self.batch_shape})"
-
 
   def __post_init__(self, broadcast,  convert_types):
     self.check_shapes(broadcast=broadcast,  convert_types=convert_types)
