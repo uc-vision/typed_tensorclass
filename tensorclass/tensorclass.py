@@ -1,7 +1,9 @@
 from dataclasses import InitVar, dataclass, fields, Field
+from functools import cached_property
 from numbers import Number
 from typing import List
 import torch
+import numpy as np
 
 from torch import Tensor
 from jaxtyping.array_types import _NamedVariadicDim, _NamedDim, _FixedDim, AbstractArray, Float32, Int32
@@ -143,6 +145,9 @@ class TensorClass():
       if issubclass(f.type, AbstractArray):
         t = _add_batch_dim(f.type, broadcast=broadcast)
 
+        if not isinstance(value, torch.Tensor):
+          raise TypeError(f"{f.name} is not a Tensor")
+
         if not t._check_shape(value, single_memo=memo, 
               variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo):
           
@@ -199,20 +204,20 @@ class TensorClass():
       value = getattr(self, f.name)
       if issubclass(f.type, AbstractArray):
         return field_shape(f, value)
-      elif isinstance(f, TensorClass):
-        return value.shape()
+      elif issubclass(f.type, TensorClass):
+        return value.shape
       else:
         return value
     return {f.name:g(f) for f in fields(self)}
 
-  @property
+  @cached_property
   def shape_info(self):
     def g(f:Field):
       value = getattr(self, f.name)
       if issubclass(f.type, AbstractArray):
         return (field_shape(f, value), value.dtype)
-      elif isinstance(f, TensorClass):
-        return value.shape_info()
+      elif issubclass(f.type, TensorClass):
+        return value.shape_info
       else:
         return value
     return {f.name:g(f) for f in fields(self)}
@@ -227,13 +232,21 @@ class TensorClass():
         return f.type.static_shape_info()
       else:
         return value
-    return {f.name:g(f) for f in fields(self)}
+    return {f.name:g(f) for f in fields(cls)}
+  
+
+  @classmethod 
+  def flat_size(cls):
+    shapes = cls.static_shape_info()
+    return sum([np.prod(s) for s, _ in shapes.values()])
 
 
-  def __iter__(self):
+  def items(self):
     fs = fields(self)
     for f in fs:
       yield (f.name, getattr(self, f.name))
+
+      
 
   def map_with_info(self, func):
     def g(field):
@@ -272,10 +285,21 @@ class TensorClass():
 
   def expand(self, shape):
     return self.map(lambda t: t.expand(shape))
+  
+  def reshape(self, *batch_shape):
+    def g(name, value, shape):
+      if isinstance(value, TensorClass):
+        return t.reshape(batch_shape)
+      if isinstance(value, torch.Tensor):
+        return value.reshape(batch_shape + shape)
+      else:
+        return value
+        
+    return self.map_with_info(g)
 
 
   @classmethod
-  def _build(cls:type, f, batch_shape=(), device=torch.device('cpu'), sizes=None, **kwargs):
+  def _build(cls:type, f, batch_shape=(), device=torch.device('cpu'), sizes=None, kwargs=None):
     sizes = {} if sizes is None else sizes
     
     if isinstance(batch_shape, Number):
@@ -291,18 +315,26 @@ class TensorClass():
     tensors = {f.name: t  
         for f in fields(cls)
           if (t := make_tensor(f.type)) is not None}
-    return cls(**tensors, **kwargs)
+    return cls(**tensors, **(kwargs or {}) )
 
 
 
   @classmethod
-  def empty(cls:type, batch_shape=(), device=torch.device('cpu'), sizes=None, **kwargs):
-    return cls._build(torch.empty, batch_shape=batch_shape, device=device, sizes=sizes, **kwargs)
+  def empty(cls:type, batch_shape=(), device=torch.device('cpu'), sizes=None, kwargs=None):
+    return cls._build(torch.empty, batch_shape=batch_shape, device=device, sizes=sizes, kwargs=kwargs)
 
   @classmethod
-  def zeros(cls:type, batch_shape=(), device=torch.device('cpu'), sizes=None, **kwargs):
-    return cls._build(torch.zeros, batch_shape=batch_shape, device=device, sizes=sizes, **kwargs)
+  def zeros(cls:type, batch_shape=(), device=torch.device('cpu'), sizes=None, kwargs=None):
+    return cls._build(torch.zeros, batch_shape=batch_shape, device=device, sizes=sizes, kwargs=kwargs)
 
+
+  @cached_property
+  def device(self):
+    devices = [t.device for t in self.tensors()]
+    if not all([d == devices[0] for d in devices]):
+      raise ValueError("Inconsistent devices found")
+    
+    return devices[0]
 
 
   def unsqueeze(self, dim):
@@ -315,15 +347,15 @@ class TensorClass():
         return value.asdict()
       else:
         return value
-    return {k: get_value(value) for k, value in self.__iter__()}
+    return {k: get_value(value) for k, value in self.items()}
         
   def tensors(self) -> List[torch.Tensor]:
     x = []
-    for f in self.asdict().values():
-      if isinstance(f, TensorClass):
-        x.extend(f.tensors())
-      elif isinstance(f, torch.Tensor):
-        x.append(f)
+    for value in self.asdict().values():
+      if isinstance(value, TensorClass):
+        x.extend(value.tensors())
+      elif isinstance(value, torch.Tensor):
+        x.append(value)
 
     return x
 
