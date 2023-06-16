@@ -239,7 +239,7 @@ class TensorClass():
         return f.type.static_shape_info()
       else:
         return value
-    return {f.name:g(f) for f in fields(self)}
+    return {f.name:g(f) for f in fields(cls)}
 
 
   def __iter__(self):
