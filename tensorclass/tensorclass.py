@@ -267,7 +267,7 @@ class TensorClass():
         shape = arr_shape(field.type)
         return func(field.name, value, shape=shape)
       elif isinstance(value, TensorClass):
-        return value.map_tensors(func)
+        return value.map_with_info(func)
       else:
         return value
 
@@ -377,7 +377,7 @@ class TensorClass():
         
   def tensors(self) -> List[torch.Tensor]:
     x = []
-    for value in self.asdict().values():
+    for k, value in self.items():
       if isinstance(value, TensorClass):
         x.extend(value.tensors())
       elif isinstance(value, torch.Tensor):
