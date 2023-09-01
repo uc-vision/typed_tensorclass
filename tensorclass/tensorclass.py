@@ -1,7 +1,7 @@
 from dataclasses import InitVar, dataclass, fields, Field
 from functools import cached_property
 from numbers import Number
-from typing import List
+from typing import List, TypeVar
 import torch
 import numpy as np
 
@@ -11,8 +11,10 @@ from torch import Tensor
 from jaxtyping.array_types import _NamedVariadicDim,\
     _NamedDim, _FixedDim, AbstractArray, Float32, Int32
 
-_batch_dim = '_B'
 
+TensorList = List[torch.Tensor | 'TensorList']:
+
+_batch_dim = '_B'
 def _add_batch_dim(t, name=_batch_dim, broadcast=True):
   if t.index_variadic is not None:
     raise ValueError(f"Variadic dimension not allowed in TensorClass {t.dim_str}")
@@ -171,8 +173,14 @@ class TensorClass():
 
       elif issubclass(f.type, TensorClass):
         value.check_shapes(broadcast=broadcast, 
-            memo=memo, variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo)
+            memo=memo, variadic_memo=variadic_memo, variadic_broadcast_memo=variadic_broadcast_memo)      
+      else:
+        raise TypeError(f"Only annotated Tensor types (TensorClass and Tensor) are supported, got {f.type}")
+
+      
+      
       self.batch_shape = batch_from_memo(variadic_memo, variadic_broadcast_memo)
+
 
     if broadcast:  
       for f in fields(self):
@@ -220,7 +228,8 @@ class TensorClass():
       elif issubclass(f.type, TensorClass):
         return value.shape_info
       else:
-        return value
+        raise TypeError(f"Only Tensor types (TensorClass and Tensor) are supported, got {f.type}")
+      
     return {f.name:g(f) for f in fields(self)}
   
   @cached_property
@@ -243,7 +252,8 @@ class TensorClass():
       elif issubclass(f.type, TensorClass):
         return f.type.static_shape_info()
       else:
-        return ()
+        raise TypeError(f"Only Tensor types (TensorClass and Tensor) are supported, got {f.type}")
+      
     return {f.name:g(f) for f in fields(cls)}
   
 
@@ -268,8 +278,6 @@ class TensorClass():
         return func(field.name, value, shape=shape)
       elif isinstance(value, TensorClass):
         return value.map_with_info(func)
-      else:
-        return value
 
     d = {f.name:g(f) for f in fields(self)}
     return self.__class__(**d)
@@ -293,7 +301,7 @@ class TensorClass():
       value1 = getattr(self, field.name)
       value2 = getattr(other, field.name)
       
-      if isinstance(value, TensorClass):
+      if isinstance(value1, TensorClass):
         return value1.zip(value2, func)
       else:
         return func(value1, value2)
@@ -322,6 +330,9 @@ class TensorClass():
         return value
         
     return self.map_with_info(g)
+  
+  def requires_grad_(self, requires_grad=True):
+    return self.map(lambda t: t.requires_grad_(requires_grad))
 
 
   @classmethod
@@ -352,7 +363,9 @@ class TensorClass():
   @classmethod
   def zeros(cls:type, batch_shape=(), device=torch.device('cpu'), sizes=None, kwargs=None):
     return cls._build(torch.zeros, batch_shape=batch_shape, device=device, sizes=sizes, kwargs=kwargs)
+  
 
+  
 
   @cached_property
   def device(self):
@@ -374,20 +387,59 @@ class TensorClass():
       else:
         return value
     return {k: get_value(value) for k, value in self.items()}
-        
-  def tensors(self) -> List[torch.Tensor]:
+
+  @classmethod 
+  def num_tensors(cls):
+    n = 0
+    for f in fields(cls):
+      if issubclass(f.type, AbstractArray):
+        n += 1
+      elif issubclass(f.type, TensorClass):
+        n += f.type.num_tensors()
+
+    return n
+
+
+  def tensors(self) -> List[torch.Tensor | List]:
     x = []
     for k, value in self.items():
       if isinstance(value, TensorClass):
         x.extend(value.tensors())
       elif isinstance(value, torch.Tensor):
         x.append(value)
-
     return x
+  
+  @classmethod
+  def from_tensors(cls:type, tensors:List[torch.Tensor]):
+    assert len(tensors) == cls.num_tensors(), f"Expected {cls.num_tensors()} tensors, got {len(tensors)}"
+    tensors = list(tensors)
+    
+    def g(f:Field):
+      if issubclass(f.type, AbstractArray):
+        return tensors.pop(0)
+      elif issubclass(f.type, TensorClass):
+        n = f.type.num_tensors()
+        
+        return f.type.from_tensors(tensors[:n])
+      else:
+        raise TypeError(f"Only Tensor types (TensorClass and Tensor) are supported, got {f.type}")
+      
+    return cls(**{f.name:g(f) for f in fields(cls)})
+      
+    
 
-  def flat(self):
+  def to_vec(self):
     return torch.concat([t.reshape(*self.batch_shape, -1) 
                          for t in self.tensors()], dim=-1)
+  
+  @classmethod
+  def from_vec(cls:type, vec:torch.Tensor):
+    shapes = cls.static_shape_info()
+    sizes = [np.prod(s) for s, _ in shapes.values()]
+
+    sizes = [t.flat_size() for t in cls.tensors()]
+    tensors = torch.split(vec, sizes, dim=-1)
+    return cls.from_tensors(tensors)
 
   def __repr__(self):
     name= self.__class__.__name__
