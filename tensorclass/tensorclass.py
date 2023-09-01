@@ -308,6 +308,15 @@ class TensorClass():
 
   def to(self, device):
     return self.map(lambda t: t.to(device))
+  
+  def requires_grad_(self, requires_grad=True):
+    return self.map(lambda t: t.requires_grad_(requires_grad))
+  
+  def requires_grad(self, requires_grad=True):
+    return self.map(lambda t: t.clone().requires_grad_(requires_grad))
+  
+  def as_parameters(self, requires_grad=True):
+    return self.map(lambda t: torch.nn.Parameter(t, requires_grad=requires_grad))
 
   def expand(self, shape):
     return self.map(lambda t: t.expand(shape))
