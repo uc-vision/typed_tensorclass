@@ -259,8 +259,13 @@ class TensorClass():
 
   @classmethod 
   def flat_size(cls):
+    return sum(cls.tensor_sizes())
+
+  @classmethod 
+  def tensor_sizes(cls):
     shapes = cls.static_shape_info()
-    return sum([np.prod(s) for s, _ in shapes.values()])
+    return [np.prod(s) for s, _ in shapes.values()]
+
 
 
   def items(self):
@@ -332,11 +337,10 @@ class TensorClass():
   def reshape(self, *batch_shape):
     def g(name, value, shape):
       if isinstance(value, TensorClass):
-        return t.reshape(batch_shape)
-      if isinstance(value, torch.Tensor):
+        return value.reshape(batch_shape)
+      elif isinstance(value, torch.Tensor):
         return value.reshape(batch_shape + shape)
-      else:
-        return value
+
         
     return self.map_with_info(g)
   
@@ -408,8 +412,17 @@ class TensorClass():
 
     return n
 
+  def tensor_shapes(cls):
+    sizes = []
+    for f in fields(cls):
+      if issubclass(f.type, AbstractArray):
+        sizes.append(np.prod(f.type.shape))
+      elif issubclass(f.type, TensorClass):
+        sizes.extend(f.type.tensor_sizes())
+    return sizes
 
-  def tensors(self) -> List[torch.Tensor | List]:
+
+  def tensors(self) -> List[torch.Tensor]:
     x = []
     for k, value in self.items():
       if isinstance(value, TensorClass):
@@ -419,36 +432,40 @@ class TensorClass():
     return x
   
   @classmethod
-  def from_tensors(cls:type, tensors:List[torch.Tensor]):
-    assert len(tensors) == cls.num_tensors(), f"Expected {cls.num_tensors()} tensors, got {len(tensors)}"
-    tensors = list(tensors)
-    
-    def g(f:Field):
+  def from_tensors(cls:type, tensors:List[Tensor]):
+    d = {}
+
+    for f in fields(cls): 
       if issubclass(f.type, AbstractArray):
-        return tensors.pop(0)
+        d[f.name] = tensors.pop(0)
+  
       elif issubclass(f.type, TensorClass):
         n = f.type.num_tensors()
+        t = [tensors.pop(0) for _ in range(n)]
         
-        return f.type.from_tensors(tensors[:n])
+        d[f.name] = f.type.from_tensors(t)
       else:
         raise TypeError(f"Only Tensor types (TensorClass and Tensor) are supported, got {f.type}")
       
-    return cls(**{f.name:g(f) for f in fields(cls)})
-      
-    
+    return cls(**d)
+
 
   def to_vec(self):
     return torch.concat([t.reshape(*self.batch_shape, -1) 
                          for t in self.tensors()], dim=-1)
   
   @classmethod
-  def from_vec(cls:type, vec:torch.Tensor):
-    shapes = cls.static_shape_info()
-    sizes = [np.prod(s) for s, _ in shapes.values()]
+  def from_vec(cls, vec):
+    shapes = cls.tensor_shapes()
+    sizes = [np.prod(s) for s in cls.tensor_shapes()]
+    
+    if vec.shape[0] % sum(sizes) != 0:
+      raise ValueError(f"Vector should have multiple of {sum(sizes)} elements, got {vec.shape[-1]}")
 
-    sizes = [t.flat_size() for t in cls.tensors()]
-    tensors = torch.split(vec, sizes, dim=-1)
+    tensors = [t.view(*shape) for t, shape in 
+               zip(torch.split(vec, sizes), shapes.values())]
     return cls.from_tensors(tensors)
+
 
   def __repr__(self):
     name= self.__class__.__name__
