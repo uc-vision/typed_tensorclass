@@ -12,7 +12,6 @@ from jaxtyping.array_types import _NamedVariadicDim,\
     _NamedDim, _FixedDim, AbstractArray, Float32, Int32
 
 
-TensorList = List[torch.Tensor | 'TensorList']:
 
 _batch_dim = '_B'
 def _add_batch_dim(t, name=_batch_dim, broadcast=True):
@@ -79,7 +78,7 @@ def lookup_dtype(dtypes):
     return dtype_to_torch[dtypes[0]]
   raise ValueError(f"Could not find default dtype in {dtypes}")    
 
-def array_shape(t:AbstractArray, sizes):
+def array_shape(t:AbstractArray, sizes={}):
   shape = []
   for d in t.dims:
     if isinstance(d, _NamedDim):
@@ -299,7 +298,7 @@ class TensorClass():
     d = {f.name:g(f) for f in fields(self)}
     return self.__class__(**d)
 
-  def zip(self, other, func):
+  def _zip(self, other, func):
     assert self.__class__ == other.__class__, f"Cannot zip TensorClass of different types: {self.__class__} != {other.__class__}"
 
     def g(field):
@@ -310,9 +309,18 @@ class TensorClass():
         return value1.zip(value2, func)
       else:
         return func(value1, value2)
+        
+    return {f.name:g(f) for f in fields(self)}
+    
 
-    d = {f.name:g(f) for f in fields(self)}
+  def zip(self, other, func):
+    d = self._zip(other, func)
     return self.__class__(**d)
+  
+
+  def allclose(self, other, rtol=1e-05, atol=1e-08, equal_nan=False):
+    d = self._zip(other, lambda a, b: torch.allclose(a, b, rtol=rtol, atol=atol, equal_nan=equal_nan))
+    return all(d.values())
 
 
 
@@ -412,13 +420,14 @@ class TensorClass():
 
     return n
 
+  @classmethod
   def tensor_shapes(cls):
     sizes = []
     for f in fields(cls):
       if issubclass(f.type, AbstractArray):
-        sizes.append(np.prod(f.type.shape))
+        sizes.append(array_shape(f.type))
       elif issubclass(f.type, TensorClass):
-        sizes.extend(f.type.tensor_sizes())
+        sizes.extend(f.type.tensor_shapes())
     return sizes
 
 
@@ -448,6 +457,9 @@ class TensorClass():
         raise TypeError(f"Only Tensor types (TensorClass and Tensor) are supported, got {f.type}")
       
     return cls(**d)
+  
+
+
 
 
   def to_vec(self):
@@ -458,12 +470,13 @@ class TensorClass():
   def from_vec(cls, vec):
     shapes = cls.tensor_shapes()
     sizes = [np.prod(s) for s in cls.tensor_shapes()]
+    total = sum(sizes)
     
-    if vec.shape[0] % sum(sizes) != 0:
-      raise ValueError(f"Vector should have multiple of {sum(sizes)} elements, got {vec.shape[-1]}")
+    if vec.shape[-1] != total:
+      raise ValueError(f"Vector should have last dimension of {sum(sizes)} elements, got {vec.shape}")
 
-    tensors = [t.view(*shape) for t, shape in 
-               zip(torch.split(vec, sizes), shapes.values())]
+    tensors = [t.view(-1, *shape) for t, shape in 
+               zip(torch.split(vec, sizes, dim=-1), shapes)]
     return cls.from_tensors(tensors)
 
 
