@@ -330,6 +330,17 @@ class TensorClass():
   def to(self, device):
     return self.map(lambda t: t.to(device))
   
+  def cpu(self):
+    return self.map(lambda t: t.cpu())
+  
+  def cuda(self):
+    return self.map(lambda t: t.cuda())
+
+
+  def detach(self):
+    return self.map(lambda t: t.detach())
+  
+  
   def requires_grad_(self, requires_grad=True):
     return self.map(lambda t: t.requires_grad_(requires_grad))
   
