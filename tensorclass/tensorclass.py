@@ -335,6 +335,10 @@ class TensorClass():
   
   def cuda(self):
     return self.map(lambda t: t.cuda())
+  
+
+  def contiguous(self):
+    return self.map(lambda t: t.contiguous())
 
 
   def detach(self):
