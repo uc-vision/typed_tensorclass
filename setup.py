@@ -5,5 +5,5 @@ setup(name='typed_tensorclass',
       packages=find_packages(),
       python_version='>=3.10',
       install_requires=[
-          'jaxtyping'
+          'jaxtyping <= 0.2.19'
       ])
